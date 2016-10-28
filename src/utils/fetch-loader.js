@@ -20,12 +20,14 @@ class FetchLoader {
 
 
   load(context, config, callbacks) {
-    let stats = this.stats = {trequest: performance.now(), retry: 0, loaded : 0}, targetURL = context.url, request,
+    let stats = this.stats = {trequest: performance.now(), retry: 0, loaded : 0}, request,
         initParams = { method: 'GET',
                        mode: 'cors',
                        credentials: 'same-origin'
                      };
     this.context = context;
+    this.callbacks = callbacks;
+    this.targetURL = context.url;
 
     if (context.rangeEnd) {
       initParams.headers = new Headers({ 'Range' :  'bytes=' + context.rangeStart + '-' + (context.rangeEnd-1)});
@@ -43,22 +45,26 @@ class FetchLoader {
     let responsePromise = fetchPromise.then(function(response) {
       if (response.ok) {
         stats.tfirst = Math.max(stats.trequest,performance.now());
-        targetURL = response.url;
-        if (context.responseType === 'arraybuffer') {
-          return response.arrayBuffer();
+        this.targetURL = response.url;
+        if (context.progressData && callbacks.onProgress) {
+          this._pump.call(this, response.body.getReader());
         } else {
-          return response.text();
+          if (context.responseType === 'arraybuffer') {
+            return response.arrayBuffer();
+          } else {
+            return response.text();
+          }
         }
       } else {
         callbacks.onError({text : 'fetch, bad network response'}, context);
         return;
       }
-    }).catch(function(error) {
+    }.bind(this)).catch(function(error) {
       callbacks.onError({text : error.message}, context);
       return;
     });
     // process response Promise
-    if (!this._requestAbort) {
+    if (!this._requestAbort && responsePromise) {
       responsePromise.then(function(responseData) {
         if (responseData && !this._requestAbort) {
           stats.tload = Math.max(stats.tfirst,performance.now());
@@ -69,11 +75,28 @@ class FetchLoader {
             len = responseData.byteLength;
           }
           stats.loaded = stats.total = len;
-          let response = { url : targetURL, data : responseData};
+          let response = { url : this.targetURL, data : responseData};
           callbacks.onSuccess(response,stats,context);
         }
       }.bind(this));
     }
+  }
+
+  _pump(reader) {  // ReadableStreamReader
+    reader.read().then(
+      ({ value, done }) => {
+        let callbacks = this.callbacks,
+            stats = this.stats,
+            context = this.context;
+        if (done) {
+          callbacks.onSuccess({url :this.targetURL},stats,context);
+        } else {
+          stats.loaded += value.length;
+          callbacks.onProgress(stats, this.context,value);
+          return this._pump(reader);
+        }
+      }
+    );
   }
 }
 export default FetchLoader;
